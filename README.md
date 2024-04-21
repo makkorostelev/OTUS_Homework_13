@@ -1,6 +1,6 @@
 # OTUS_Homework_7
  
-Project creates one YC LB, 2 nginx proxy server, 2 nginx+php-fpm+wordpress backends, pxc cluster+proxysql(3 servers) and Hashicorp Vault server.\
+Project creates one YC LB, 2 nginx proxy server, 2 nginx+php-fpm+wordpress backends, pxc cluster+proxysql(3 servers) and Hashicorp Vault server.
 ### Project Scheme
 ![Project Scheme](https://github.com/makkorostelev/OTUS_Homework_13/blob/main/Screenshots/scheme.png)
 
@@ -40,8 +40,6 @@ nginx_ips = [
   "10.5.0.35",
 ]
 vault_ip = "158.160.42.185"
-
-
 ```
 Then go to vault addr by the command:\
 `ssh ubuntu@vault_ip`
