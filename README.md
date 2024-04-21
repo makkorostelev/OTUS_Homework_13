@@ -8,10 +8,10 @@ Project creates one YC LB, 2 nginx proxy server, 2 nginx+php-fpm+wordpress backe
 ### Prerequisite
 
 - **Ansible 2.9+**
-- **hvac 2.1.0=**
+- **hvac 2.1.0+**
 
 To work with the project you need to write your data into variables.tf.\
-![Variables](https://github.com/makkorostelev/OTUS_Homework_13/blob/main/Screenshots/variables.png)
+![Variables](https://github.com/makkorostelev/OTUS_Homework_13/blob/main/Screenshots/variables.png)\
 Then enter the commands:
 `terraform init`\
 `terraform apply`
