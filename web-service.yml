@@ -1,0 +1,289 @@
+---
+- hosts: admin
+  become: yes
+  gather_facts: false
+  tasks:
+    - name: Copy private_key
+      copy:
+        src: "{{ private_key }}"
+        dest: /home/ubuntu/.ssh/
+        owner: ubuntu
+        group: ubuntu
+        mode: "0600"
+
+- hosts: backend
+  become: yes
+  gather_facts: true
+  vars:
+    pakages:
+      - nginx
+      - php8.1-fpm
+      - php-curl
+      - php-json
+      - php-gd
+      - php-mbstring
+      - php-intl
+      - php-bcmath
+      - php-bz2
+      - php-readline
+      - php-zip
+      - php-xml
+      - php-xmlrpc
+      - php-soap
+      - php-imagick
+      - php-mysql
+  tasks:
+    - name: Install pakages
+      apt:
+        pkg: "{{pakages}}"
+        state: latest
+        update_cache: yes
+    - name: Download and extracting WordPress
+      unarchive:
+        src: https://ru.wordpress.org/latest-ru_RU.tar.gz
+        dest: /var/www
+        remote_src: yes
+    - name: Copy wp-config.php
+      copy:
+        src: ./wp-config.php
+        dest: /var/www/wordpress
+        owner: root
+        group: root
+        mode: "0644"
+    - name: Editing wp-config.php
+      lineinfile: dest=/var/www/wordpress/wp-config.php regexp='^WP_SITEURL' line='define( \'WP_SITEURL\', \'http://{{ public_ip }}\' );'
+    - name: Copy wp.conf
+      copy:
+        src: ./wp.conf
+        dest: /etc/nginx/sites-available/wp.conf
+        owner: root
+        group: root
+        mode: "0644"
+    - name: Create symlink wp.conf
+      file:
+        src: /etc/nginx/sites-available/wp.conf
+        dest: /etc/nginx/sites-enabled/wp.conf
+        state: link
+    - name: Delete default.conf
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+    - name: Recursively change ownership of wordpress directory
+      file:
+        path: /var/www/wordpress
+        state: directory
+        recurse: yes
+        owner: www-data
+        group: www-data
+    - name: Restart Nginx
+      service:
+        name: nginx
+        state: restarted
+
+- hosts: database
+  become: yes
+  gather_facts: true
+  vars:
+    dbservers:
+      - hostname: "database-0"
+      - hostname: "database-1"
+      - hostname: "database-2"
+  tasks:
+    - name: Install pakages
+      apt:
+        pkg:
+          - wget
+          - gnupg2
+          - lsb-release
+          - python3-pip
+        state: present
+        update_cache: yes
+    - name: Make sure pymysql is present
+      pip:
+        name: pymysql
+        state: present
+    - name: Download a percona repository
+      apt:
+        deb: https://repo.percona.com/apt/percona-release_latest.generic_all.deb
+    - name: Enable repository
+      shell: sudo percona-release enable-only pxc-80 release
+    - shell: sudo percona-release enable tools release
+    - name: "Update apt cache"
+      apt:
+        update_cache: yes
+    - name: Install Percona
+      apt:
+        pkg:
+          - percona-xtradb-cluster
+          - percona-xtradb-cluster-client
+          - proxysql2
+    - name: Editing mysqld.cnf
+      lineinfile: dest=/etc/mysql/mysql.conf.d/mysqld.cnf regexp='^wsrep_cluster_address' line='wsrep_cluster_address=gcomm://{{ database_ips }}'
+    - lineinfile: dest=/etc/mysql/mysql.conf.d/mysqld.cnf regexp='^wsrep_node_name' line='wsrep_node_name={{ ansible_hostname }}'
+    - block:
+        - name: MySQL Bootstrapping
+          service:
+            name: mysql@bootstrap.service
+            state: started
+        - name: Store server-key.pem into /tmp/fetched/
+          fetch:
+            src: /var/lib/mysql/server-key.pem
+            dest: /tmp/fetched/server-key.pem
+            flat: yes
+        - name: Store ca.pem into /tmp/fetched/
+          fetch:
+            src: /var/lib/mysql/ca.pem
+            dest: /tmp/fetched/ca.pem
+            flat: yes
+        - name: Store server-cert.pem into /tmp/fetched/
+          fetch:
+            src: /var/lib/mysql/server-cert.pem
+            dest: /tmp/fetched/server-cert.pem
+            flat: yes
+      when: ansible_hostname == "database-0"
+    - block:
+        - name: Copy server-key.pem
+          copy:
+            src: /tmp/fetched/server-key.pem
+            dest: /var/lib/mysql/server-key.pem
+            owner: mysql
+            group: mysql
+            mode: "0600"
+        - name: Copy ca.pem
+          copy:
+            src: /tmp/fetched/ca.pem
+            dest: /var/lib/mysql/ca.pem
+            owner: mysql
+            group: mysql
+            mode: "0644"
+        - name: Copy server-cert.pem
+          copy:
+            src: /tmp/fetched/server-cert.pem
+            dest: /var/lib/mysql/server-cert.pem
+            owner: mysql
+            group: mysql
+            mode: "0644"
+        - name: Starting MySQL
+          service:
+            name: mysql
+            state: started
+      when: ansible_hostname != "database-0"
+    - block:
+        - name: Create mysql user
+          mysql_user:
+            name: wp_user
+            password: wp_password
+            login_unix_socket: /var/run/mysqld/mysqld.sock
+            priv: "*.*:ALL"
+            host: "%"
+            check_implicit_admin: true
+        - name: Create DB
+          mysql_db:
+            login_unix_socket: /var/run/mysqld/mysqld.sock
+            name: wp_database
+            state: present
+        - name: Add servers to ProxySQL
+          community.proxysql.proxysql_backend_servers:
+            login_user: "admin"
+            login_password: "admin"
+            hostgroup_id: 1
+            hostname: "{{ item.hostname }}"
+            port: 3306
+            state: present
+          loop: "{{ dbservers }}"
+        - name: Add a replication hostgroup
+          community.proxysql.proxysql_replication_hostgroups:
+            login_user: "admin"
+            login_password: "admin"
+            writer_hostgroup: 0
+            reader_hostgroup: 1
+            state: present
+            comment: "cluster1"
+        - name: Set the value of a mysql-monitor_username variable
+          community.proxysql.proxysql_global_variables:
+            login_user: "admin"
+            login_password: "admin"
+            variable: "mysql-monitor_username"
+            value: "wp_user"
+        - name: Set the value of a mysql-monitor_password variable
+          community.proxysql.proxysql_global_variables:
+            login_user: "admin"
+            login_password: "admin"
+            variable: "mysql-monitor_password"
+            value: "wp_password"
+        - name: Add a ProxySQL user
+          community.proxysql.proxysql_mysql_users:
+            login_user: "admin"
+            login_password: "admin"
+            username: "wp_user"
+            password: "wp_password"
+            state: present
+
+        - name: Load the mysql query rules config from memory to runtime
+          community.proxysql.proxysql_manage_config:
+            login_user: "admin"
+            login_password: "admin"
+            action: "LOAD"
+            config_settings: "MYSQL SERVERS"
+            direction: "TO"
+            config_layer: "RUNTIME"
+        - name: Save the mysql users config from memory to disk
+          community.proxysql.proxysql_manage_config:
+            login_user: "admin"
+            login_password: "admin"
+            action: "SAVE"
+            config_settings: "MYSQL SERVERS"
+            direction: "TO"
+            config_layer: "DISK"
+      when: ansible_hostname == "database-0"
+
+- hosts: nginx
+  become: yes
+  gather_facts: true
+  tasks:
+    - name: Install Nginx
+      apt:
+        pkg: nginx
+        state: latest
+        update_cache: yes
+    - name: Copy nginx.conf
+      copy:
+        src: ./nginx.conf
+        dest: /etc/nginx/nginx.conf
+        owner: root
+        group: root
+        mode: "0644"
+    - name: Restart Nginx
+      service:
+        name: nginx
+        state: restarted
+
+
+- hosts: vault
+  become: yes
+  gather_facts: true
+  tasks:
+    - name: Copy vault.hcl
+      copy:
+        src: ./vault.hcl
+        dest: /etc/vault.d/
+        owner: root
+        group: root
+        mode: "0644"
+    - name: Restart Vault
+      service:
+        name: vault
+        state: restarted
+    - name: Recursively change ownership of vault directory
+      file:
+        path: /opt/vault/data
+        state: directory
+        recurse: yes
+        owner: vault
+        group: vault
+    - name: Adding the path in the bashrc files
+      lineinfile: dest=/home/ubuntu/.bashrc line='export VAULT_ADDR=http://127.0.0.1:8200'
+    - name: Source the bashrc file
+      shell: source /home/ubuntu/.bashrc
+      args:
+        executable: /bin/bash
